@@ -202,10 +202,23 @@ class CaidaProvider extends ChangeNotifier {
   }
 
   Future<bool> restoreGameFromFirebase(FirebaseService fb) async {
+    isGameReady = false;
+    notifyListeners();
+
     try {
-      final doc = await fb.userGameDoc('caida').get();
-      if (doc.exists && doc.data()?['gameInProgress'] == true) {
-        final data = doc.data()!;
+      final uid = fb.user?.uid;
+      if (uid == null) {
+        isGameReady = true;
+        notifyListeners();
+        return false;
+      }
+
+      final docRef = fb.userGameDoc('caidaGame');
+      final snap = await docRef.get();
+      if (snap.exists) {
+        final data = snap.data() as Map<String, dynamic>;
+
+        // Puntajes y flags
         logic.playerScore = data['playerScore'] ?? 0;
         logic.opponentScore = data['opponentScore'] ?? 0;
         logic.playerCapturedCount = data['playerCapturedCount'] ?? 0;
@@ -217,21 +230,31 @@ class CaidaProvider extends ChangeNotifier {
         logic.lastPlayerToCapture = data['lastPlayerToCapture'];
         logic.lastCardPlayedByPreviousPlayerRank =
             data['lastCardPlayedByPreviousPlayerRank'];
+
+        // Mazos y estado de mesa/manos
         logic.fullShuffledDeck = (data['fullShuffledDeck'] as List? ?? [])
-            .map((map) => CaidaCard.fromMap(map))
+            .map((m) => CaidaCard.fromMap(m))
             .toList();
         logic.deck = (data['deck'] as List? ?? [])
-            .map((map) => CaidaCard.fromMap(map))
+            .map((m) => CaidaCard.fromMap(m))
             .toList();
         logic.playerHand = (data['playerHand'] as List? ?? [])
-            .map((map) => CaidaCard.fromMap(map))
+            .map((m) => CaidaCard.fromMap(m))
             .toList();
         logic.opponentHand = (data['opponentHand'] as List? ?? [])
-            .map((map) => CaidaCard.fromMap(map))
+            .map((m) => CaidaCard.fromMap(m))
             .toList();
         logic.tableCards = (data['tableCards'] as List? ?? [])
-            .map((map) => CaidaCard.fromMap(map))
+            .map((m) => CaidaCard.fromMap(m))
             .toList();
+
+        // --- FIX IMPORTANTE ---
+        // Si la restauración vino "vacía" de manos, reparte AHORA mismo y registra cantos.
+        if (logic.playerHand.isEmpty && logic.opponentHand.isEmpty) {
+          final res = logic.dealHandsAndCheckCantos();
+          _handleCantoResult(res['cantoResult']);
+        }
+
         _log('Partida anterior restaurada.');
         isGameReady = true;
         notifyListeners();
@@ -240,6 +263,8 @@ class CaidaProvider extends ChangeNotifier {
     } catch (e) {
       debugPrint("Error al restaurar el estado del juego: $e");
     }
+
+    // Si no había doc o falló, marcamos listo igualmente para que se inicie nuevo juego.
     isGameReady = true;
     notifyListeners();
     return false;

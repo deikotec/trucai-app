@@ -31,6 +31,7 @@ class _CaidaGameScreenState extends State<CaidaGameScreen> {
       GlobalKey(); // Para el sistema de coordenadas de los efectos.
   final GlobalKey _tableKey =
       GlobalKey(); // Para el destino del "vuelo" de la carta.
+  final GlobalKey _opponentAreaKey = GlobalKey(); // origen del vuelo del bot
   final FxController _fxController = FxController();
   bool _isInitialized = false;
 
@@ -144,9 +145,11 @@ class _CaidaGameScreenState extends State<CaidaGameScreen> {
                       Column(
                         children: [
                           OpponentHand(
+                            key: _opponentAreaKey, // la propia key del widget
                             cardWidth: cardWidth,
                             cardHeight: cardHeight,
-                            areaKey: _centerStackKey,
+                            areaKey:
+                                _opponentAreaKey, // <-- FIX: key dedicada al área superior
                           ),
                           TableBoard(
                             key: _tableKey, // Key para la mesa.
