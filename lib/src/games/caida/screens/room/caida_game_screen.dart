@@ -15,9 +15,11 @@ import './components/player_hand.dart';
 import './components/log_panel.dart';
 import './components/score_panel.dart';
 import './components/bottom_action_panel.dart';
+import './components/game_over_dialog.dart';
 import '../../../common/fx/fx_controller.dart';
 import '../../../common/fx/fx_overlay.dart';
 
+// El StatefulWidget ahora solo gestiona el estado de la propia pantalla.
 class CaidaGameScreen extends StatefulWidget {
   const CaidaGameScreen({super.key});
 
@@ -26,53 +28,71 @@ class CaidaGameScreen extends StatefulWidget {
 }
 
 class _CaidaGameScreenState extends State<CaidaGameScreen> {
-  // GlobalKeys para obtener el tamaño y posición de los widgets en el árbol.
-  final GlobalKey _centerStackKey =
-      GlobalKey(); // Para el sistema de coordenadas de los efectos.
-  final GlobalKey _tableKey =
-      GlobalKey(); // Para el destino del "vuelo" de la carta.
-  final GlobalKey _opponentAreaKey = GlobalKey(); // origen del vuelo del bot
+  final GlobalKey _centerStackKey = GlobalKey();
+  final GlobalKey _tableKey = GlobalKey();
   final FxController _fxController = FxController();
-  bool _isInitialized = false;
+
+  // El ChangeNotifierProvider ahora envuelve la pantalla del juego
+  // para que el estado del provider persista durante toda la vida de la pantalla.
+  @override
+  Widget build(BuildContext context) {
+    return ChangeNotifierProvider(
+      create: (_) => CaidaProvider(),
+      child: const _CaidaGameView(),
+    );
+  }
+}
+
+// Un widget interno para construir la UI una vez que el provider está disponible.
+class _CaidaGameView extends StatefulWidget {
+  const _CaidaGameView();
+
+  @override
+  State<_CaidaGameView> createState() => _CaidaGameViewState();
+}
+
+class _CaidaGameViewState extends State<_CaidaGameView> {
+  final GlobalKey _centerStackKey = GlobalKey();
+  final GlobalKey _tableKey = GlobalKey();
+  final FxController _fxController = FxController();
+  bool _isInitializing = false;
 
   @override
   void initState() {
     super.initState();
-    // Se inicializa el juego después de que el primer frame sea renderizado.
+    // La inicialización se llama una sola vez.
     WidgetsBinding.instance.addPostFrameCallback((_) => _initializeGame());
   }
 
-  // Lógica de inicialización del juego.
   Future<void> _initializeGame() async {
-    if (!mounted || _isInitialized) return;
-    setState(() => _isInitialized = true);
+    // Previene múltiples inicializaciones.
+    if (_isInitializing || !mounted) return;
+    setState(() => _isInitializing = true);
 
     final provider = context.read<CaidaProvider>();
     final firebaseService = context.read<FirebaseService>();
 
-    // Intenta restaurar una partida en progreso desde Firestore.
-    final gameRestored = await provider.restoreGameFromFirebase(
-      firebaseService,
-    );
+    final restored = await provider.restoreGameFromFirebase(firebaseService);
 
-    // Si no hay partida para restaurar, empieza una nueva.
-    if (!gameRestored) {
+    if (!restored && mounted) {
       provider.newGame(fullReset: true);
-      // Muestra el diálogo de elección inicial si el jugador es "mano".
       if (provider.logic.roundStarter == 'player') {
         final choice = await _showInitialChoiceDialog();
-        provider.initialChoice(choice);
+        if (mounted)
+          provider.initialChoice(
+            choice,
+            firebaseService,
+          ); // Asegúrate de pasar ambos argumentos requeridos
       } else {
-        // El bot elige aleatoriamente.
-        provider.initialChoice(provider.logic.botRandomChoice());
+        provider.initialChoice(
+          provider.logic.botRandomChoice(),
+          firebaseService,
+        );
       }
+      if (mounted) provider.persistGameState(firebaseService);
     }
-
-    // Persiste el estado inicial del juego.
-    provider.persistGameState(firebaseService);
   }
 
-  // Muestra el diálogo para que el jugador elija el orden de la mesa.
   Future<String> _showInitialChoiceDialog() async {
     final choice = await showDialog<String>(
       context: context,
@@ -92,110 +112,111 @@ class _CaidaGameScreenState extends State<CaidaGameScreen> {
         ],
       ),
     );
-    return choice ??
-        'asc'; // Devuelve 'asc' por defecto si el diálogo se cierra.
+    return choice ?? 'asc';
   }
 
   @override
   Widget build(BuildContext context) {
-    // Determina el layout basado en el ancho de la pantalla.
+    final provider = context.watch<CaidaProvider>();
+    final firebaseService = context.read<FirebaseService>();
     final isWideLayout = MediaQuery.of(context).size.width > 1000;
     final cardWidth = isWideLayout ? 100.0 : 72.0;
     final cardHeight = isWideLayout ? 150.0 : 108.0;
 
-    return ChangeNotifierProvider(
-      create: (_) => CaidaProvider(),
-      child: Consumer<CaidaProvider>(
-        builder: (context, provider, child) {
-          // Si el juego no está inicializado, muestra un loader.
-          if (!provider.isGameReady) {
-            return const Scaffold(
-              body: Center(child: CircularProgressIndicator()),
-            );
-          }
+    // Listener para el fin del juego.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (provider.gameWinner != null &&
+          ModalRoute.of(context)?.isCurrent == true) {
+        showGameOverDialog(
+          context: context,
+          winner: provider.gameWinner!,
+          onNewGame: () {
+            Navigator.of(context).pop();
+            provider.newGame(fullReset: true);
+            _initializeGame();
+          },
+          onExit: () {
+            Navigator.of(
+              context,
+            ).popUntil((route) => route.settings.name == '/lobby');
+          },
+        );
+      }
+    });
 
-          return Scaffold(
-            appBar: AppBar(
-              title: const Text('Caída Venezolana'),
-              actions: [
-                // Muestra el puntaje en la AppBar.
-                Center(
-                  child: Padding(
-                    padding: const EdgeInsets.only(right: 16.0),
-                    child: Text(
-                      'Tú: ${provider.logic.playerScore} | Bot: ${provider.logic.opponentScore}',
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w600,
-                        fontSize: 16,
-                      ),
-                    ),
-                  ),
+    // Si el juego no está listo (cargando desde Firebase), muestra un loader.
+    if (!provider.isGameReady) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Caída Venezolana'),
+        actions: [
+          Center(
+            child: Padding(
+              padding: const EdgeInsets.only(right: 16.0),
+              child: Text(
+                'Tú: ${provider.logic.playerScore} | Bot: ${provider.logic.opponentScore}',
+                style: const TextStyle(
+                  fontWeight: FontWeight.w600,
+                  fontSize: 16,
                 ),
-              ],
+              ),
             ),
-            body: Row(
-              children: [
-                // El panel de logs es visible solo en pantallas anchas.
-                if (isWideLayout) const LogPanel(),
-                // Zona central del juego.
-                Expanded(
-                  child: Stack(
-                    key: _centerStackKey,
-                    children: [
-                      Column(
-                        children: [
-                          OpponentHand(
-                            key: _opponentAreaKey, // la propia key del widget
-                            cardWidth: cardWidth,
-                            cardHeight: cardHeight,
-                            areaKey:
-                                _opponentAreaKey, // <-- FIX: key dedicada al área superior
-                          ),
-                          TableBoard(
-                            key: _tableKey, // Key para la mesa.
-                            cardWidth: cardWidth,
-                            cardHeight: cardHeight,
-                          ),
-                          PlayerHand(
-                            cardWidth: cardWidth,
-                            cardHeight: cardHeight,
-                            centerStackKey: _centerStackKey,
-                            tableKey: _tableKey,
-                            fxController:
-                                _fxController, // Fix: agrega el parámetro requerido
-                          ),
-                        ],
-                      ),
-                      // Overlay para los efectos visuales (vuelo de cartas).
-                      FxOverlay(controller: _fxController),
-                    ],
-                  ),
-                ),
-                // Panel de puntaje y acciones en pantallas anchas.
-                if (isWideLayout)
-                  ScorePanel(
-                    onNewGame: () {
-                      final provider = context.read<CaidaProvider>();
-                      provider.newGame(fullReset: true);
-                    },
-                    onExit: () {
-                      Navigator.of(context).pop();
-                    },
-                  ),
-              ],
-            ),
-            // Barra de navegación inferior para acciones en pantallas pequeñas.
-            bottomNavigationBar: isWideLayout
-                ? null
-                : BottomActionPanel(
-                    onNewGame: () {
-                      final provider = context.read<CaidaProvider>();
-                      provider.newGame(fullReset: true);
-                    },
-                  ),
-          );
-        },
+          ),
+        ],
       ),
+      body: Row(
+        children: [
+          if (isWideLayout) const LogPanel(),
+          Expanded(
+            child: Stack(
+              key: _centerStackKey,
+              children: [
+                Column(
+                  children: [
+                    OpponentHand(
+                      cardWidth: cardWidth,
+                      cardHeight: cardHeight,
+                      areaKey: _centerStackKey,
+                    ),
+                    TableBoard(
+                      key: _tableKey,
+                      cardWidth: cardWidth,
+                      cardHeight: cardHeight,
+                    ),
+                    PlayerHand(
+                      cardWidth: cardWidth,
+                      cardHeight: cardHeight,
+                      centerStackKey: _centerStackKey,
+                      tableKey: _tableKey,
+                      fxController: _fxController,
+                    ),
+                  ],
+                ),
+                FxOverlay(controller: _fxController),
+              ],
+            ),
+          ),
+          if (isWideLayout)
+            ScorePanel(
+              onNewGame: () {
+                provider.newGame(fullReset: true);
+                _initializeGame();
+              },
+              onExit: () => Navigator.of(context).pop(),
+            ),
+        ],
+      ),
+      bottomNavigationBar: isWideLayout
+          ? null
+          : BottomActionPanel(
+              onNewGame: () {
+                provider.newGame(fullReset: true);
+                _initializeGame();
+              },
+            ),
     );
   }
 }

@@ -59,7 +59,8 @@ class CaidaProvider extends ChangeNotifier {
   }
 
   // Procesa la elección inicial del orden de la mesa.
-  void initialChoice(String choice) {
+  // **CORRECCIÓN**: Se añade el parámetro FirebaseService para poder llamar a opponentAutoPlay.
+  void initialChoice(String choice, FirebaseService fb) {
     final pts = logic.processTableOrderChoice(choice);
     _log(
       '${logic.roundStarter == 'player' ? 'Elegiste' : 'El Bot eligió'} orden ${choice == 'asc' ? 'ascendente' : 'descendente'}: +$pts pts.',
@@ -69,6 +70,14 @@ class CaidaProvider extends ChangeNotifier {
     _handleCantoResult(result['cantoResult']);
 
     notifyListeners();
+
+    // **CORRECCIÓN**: Si después de la configuración inicial es el turno del bot, iniciar su jugada.
+    if (!logic.isPlayerTurn && logic.gameInProgress) {
+      Future.delayed(
+        const Duration(milliseconds: 1500),
+        () => opponentAutoPlay(fb),
+      );
+    }
   }
 
   // Maneja la acción del jugador al tocar una carta.
@@ -202,23 +211,10 @@ class CaidaProvider extends ChangeNotifier {
   }
 
   Future<bool> restoreGameFromFirebase(FirebaseService fb) async {
-    isGameReady = false;
-    notifyListeners();
-
     try {
-      final uid = fb.user?.uid;
-      if (uid == null) {
-        isGameReady = true;
-        notifyListeners();
-        return false;
-      }
-
-      final docRef = fb.userGameDoc('caidaGame');
-      final snap = await docRef.get();
-      if (snap.exists) {
-        final data = snap.data() as Map<String, dynamic>;
-
-        // Puntajes y flags
+      final doc = await fb.userGameDoc('caida').get();
+      if (doc.exists && doc.data()?['gameInProgress'] == true) {
+        final data = doc.data()!;
         logic.playerScore = data['playerScore'] ?? 0;
         logic.opponentScore = data['opponentScore'] ?? 0;
         logic.playerCapturedCount = data['playerCapturedCount'] ?? 0;
@@ -230,41 +226,35 @@ class CaidaProvider extends ChangeNotifier {
         logic.lastPlayerToCapture = data['lastPlayerToCapture'];
         logic.lastCardPlayedByPreviousPlayerRank =
             data['lastCardPlayedByPreviousPlayerRank'];
-
-        // Mazos y estado de mesa/manos
         logic.fullShuffledDeck = (data['fullShuffledDeck'] as List? ?? [])
-            .map((m) => CaidaCard.fromMap(m))
+            .map((map) => CaidaCard.fromMap(map))
             .toList();
         logic.deck = (data['deck'] as List? ?? [])
-            .map((m) => CaidaCard.fromMap(m))
+            .map((map) => CaidaCard.fromMap(map))
             .toList();
         logic.playerHand = (data['playerHand'] as List? ?? [])
-            .map((m) => CaidaCard.fromMap(m))
+            .map((map) => CaidaCard.fromMap(map))
             .toList();
         logic.opponentHand = (data['opponentHand'] as List? ?? [])
-            .map((m) => CaidaCard.fromMap(m))
+            .map((map) => CaidaCard.fromMap(map))
             .toList();
         logic.tableCards = (data['tableCards'] as List? ?? [])
-            .map((m) => CaidaCard.fromMap(m))
+            .map((map) => CaidaCard.fromMap(map))
             .toList();
-
-        // --- FIX IMPORTANTE ---
-        // Si la restauración vino "vacía" de manos, reparte AHORA mismo y registra cantos.
-        if (logic.playerHand.isEmpty && logic.opponentHand.isEmpty) {
-          final res = logic.dealHandsAndCheckCantos();
-          _handleCantoResult(res['cantoResult']);
-        }
-
         _log('Partida anterior restaurada.');
         isGameReady = true;
         notifyListeners();
+
+        // **CORRECCIÓN**: Si al restaurar es el turno del bot, que juegue.
+        if (!logic.isPlayerTurn && logic.gameInProgress) {
+          Future.microtask(() => opponentAutoPlay(fb));
+        }
         return true;
       }
     } catch (e) {
       debugPrint("Error al restaurar el estado del juego: $e");
     }
-
-    // Si no había doc o falló, marcamos listo igualmente para que se inicie nuevo juego.
+    // Si no hay juego para restaurar o hay un error, el juego está "listo" para empezar de cero.
     isGameReady = true;
     notifyListeners();
     return false;
