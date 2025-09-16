@@ -1,21 +1,22 @@
-// src/games/caida/widgets/player_hand.dart
-// Mano del jugador con ANIMACIÓN de "vuelo" al centro de la mesa.
-// Calcula el rect de la carta tocada y dispara un CardFlight en FxController.
+// src/games/caida/screens/room/components/player_hand.dart
+// Este widget muestra las cartas en la mano del jugador y maneja la interacción
+// de tocar una carta para jugarla.
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+
 import '../../../../common/widgets/card_widget.dart';
 import '../../../../common/fx/fx_controller.dart';
 import '../../../models/caida_card.dart';
 import '../../../providers/caida_provider.dart';
+import '../../../../../core/services/firebase_service.dart';
 
 class PlayerHand extends StatelessWidget {
   final double cardWidth;
   final double cardHeight;
-  final GlobalKey
-  centerStackKey; // Stack que contiene la mesa (para convertir coords)
-  final GlobalKey tableKey; // Contenedor de la mesa (destino visual)
-  final FxController fx;
+  final GlobalKey centerStackKey;
+  final GlobalKey tableKey;
+  final FxController fxController;
 
   const PlayerHand({
     super.key,
@@ -23,69 +24,80 @@ class PlayerHand extends StatelessWidget {
     required this.cardHeight,
     required this.centerStackKey,
     required this.tableKey,
-    required this.fx,
+    required this.fxController,
   });
 
   @override
   Widget build(BuildContext context) {
-    final prov = context.watch<CaidaProvider>();
-    final canPlay = prov.logic.isPlayerTurn;
-    final cards = prov.logic.playerHand;
+    // Escucha tanto al CaidaProvider como al FirebaseService.
+    final provider = context.watch<CaidaProvider>();
+    final firebaseService = context.read<FirebaseService>();
+    final canPlay =
+        provider.logic.isPlayerTurn && provider.logic.gameInProgress;
+    final cards = provider.logic.playerHand;
 
     return SizedBox(
       height: cardHeight + 48,
       child: LayoutBuilder(
-        builder: (context, c) {
-          final totalW = c.maxWidth;
+        builder: (context, constraints) {
+          final totalWidth = constraints.maxWidth;
           final count = cards.length;
-          final spacing = count > 0
-              ? (totalW - cardWidth) / (count == 1 ? 1 : (count - 1))
-              : 0;
+          // Calcula el espaciado entre cartas para que se superpongan de forma atractiva.
+          final spacing = count > 1
+              ? (totalWidth - cardWidth - 32) /
+                    (count - 1) // 32 es un padding extra
+              : 0.0;
           final clampedSpacing = spacing.clamp(18.0, cardWidth * 0.7);
 
           return Stack(
-            alignment: Alignment.centerLeft,
-            children: [
-              for (int i = 0; i < count; i++)
-                _AnimatedHandCard(
-                  key: ValueKey(cards[i].id),
-                  left: (i * clampedSpacing).toDouble(),
-                  angleDeg: (i - (count - 1) / 2) * 3.5,
-                  child: _TapMeasureCard(
-                    card: cards[i],
-                    width: cardWidth,
-                    height: cardHeight,
-                    disabled: !canPlay,
-                    onMeasuredTap: (rect) {
-                      if (!canPlay) return;
-                      _launchFlight(rect, cards[i]);
-                      // Ejecutar jugada tras disparar el vuelo
-                      prov.playerTapCard(cards[i]);
-                    },
-                  ),
+            alignment: Alignment.center,
+            children: List.generate(cards.length, (i) {
+              final card = cards[i];
+              // Calcula la posición horizontal de cada carta.
+              final leftPosition =
+                  (totalWidth / 2) -
+                  (cardWidth / 2) +
+                  (i - (count - 1) / 2) * clampedSpacing;
+
+              return _AnimatedHandCard(
+                key: ValueKey(card.id),
+                left: leftPosition,
+                angleDeg: (i - (count - 1) / 2) * 3.5,
+                child: _TapMeasureCard(
+                  card: card,
+                  width: cardWidth,
+                  height: cardHeight,
+                  disabled: !canPlay,
+                  onMeasuredTap: (rect) {
+                    if (!canPlay) return;
+                    _launchFlight(rect, card);
+                    // Llama al método correcto en el provider.
+                    provider.playerPlayCard(card, firebaseService);
+                  },
                 ),
-            ],
+              );
+            }),
           );
         },
       ),
     );
   }
 
+  // Lanza la animación de "vuelo" de la carta.
   void _launchFlight(Rect cardGlobalRect, CaidaCard card) {
     final stackCtx = centerStackKey.currentContext;
     final tableCtx = tableKey.currentContext;
     if (stackCtx == null || tableCtx == null) return;
 
-    // Convertir posiciones globales a locales del Stack central
     final stackBox = stackCtx.findRenderObject() as RenderBox;
     final tableBox = tableCtx.findRenderObject() as RenderBox;
 
     final startCenter = stackBox.globalToLocal(cardGlobalRect.center);
-    final tableCenter = tableBox.size.center(Offset.zero);
-    final tableCenterGlobal = tableBox.localToGlobal(tableCenter);
+    final tableCenterLocal = tableBox.size.center(Offset.zero);
+    final tableCenterGlobal = tableBox.localToGlobal(tableCenterLocal);
     final endCenter = stackBox.globalToLocal(tableCenterGlobal);
 
-    fx.flyCard(
+    fxController.flyCard(
       CardFlight(
         imageUrl: card.imageUrl,
         from: startCenter,
@@ -96,6 +108,7 @@ class PlayerHand extends StatelessWidget {
   }
 }
 
+// Widget para animar la posición y rotación de la carta.
 class _AnimatedHandCard extends StatelessWidget {
   final double left;
   final double angleDeg;
@@ -125,14 +138,13 @@ class _AnimatedHandCard extends StatelessWidget {
   }
 }
 
-typedef MeasuredTap = void Function(Rect globalRect);
-
+// Widget que mide su propia posición global al ser tocado.
 class _TapMeasureCard extends StatelessWidget {
   final CaidaCard card;
   final double width;
   final double height;
   final bool disabled;
-  final MeasuredTap onMeasuredTap;
+  final void Function(Rect globalRect) onMeasuredTap;
 
   const _TapMeasureCard({
     required this.card,
